@@ -20,7 +20,10 @@ void run_server(int port)
     }
     ix::WebSocketServer server(port, host);
     ix::WebSocket* client_socket = nullptr; 
-    std::atomic<bool> running(true);
+
+    DiffieHellman dh(DH_PRIME, DH_GENERATOR);
+    uint64_t sharedKey = 0;
+    bool dhReady = false;
 
     server.setOnClientMessageCallback(
         [&](std::shared_ptr<ix::ConnectionState> connectionState,
@@ -30,12 +33,25 @@ void run_server(int port)
             switch (msg->type)
             {
                 case ix::WebSocketMessageType::Open:
-                    std::cout << "[state] Client connected: " << connectionState->getRemoteIp() << std::endl;
+                    std::cout << "[state] Client connected: " << connectionState->getRemoteIp() << '\n';
                     client_socket = &webSocket;
+                    webSocket.send(std::to_string(dh.getPublicKey()));
                     break;
 
                 case ix::WebSocketMessageType::Message:
-                    std::cout << "[peer] " << msg->str << std::endl;
+                    if (!dhReady)
+                    {
+                        uint64_t clientPub = std::stoull(msg->str);
+                        sharedKey = dh.computeSharedKey(clientPub);
+                        dhReady = true;
+
+                        std::cout << "[DH] Shared key established\n";
+                    }
+                    else
+                    {
+                        std::string decrypted = DiffieHellman::xorCrypt(msg->str, sharedKey);
+                        std::cout << "[peer] " << decrypted << '\n';
+                    }
                     break;
 
                 case ix::WebSocketMessageType::Close:
@@ -51,19 +67,24 @@ void run_server(int port)
     server.listenAndStart();
     std::cout << "[Server running] Type 'exit' to stop\n";
 
+
+
+    std::atomic<bool> running(true);
     std::thread inputThread([&]()
     {
         std::string line;
         while (running)
         {
             std::getline(std::cin, line);
-            if (line == "exit")
+            if (line == "exit") running = false;
+            if (client_socket && dhReady)
             {
-                running = false;
-                break;
+                std::string encrypted = DiffieHellman::xorCrypt(line, sharedKey);
+                client_socket->send(encrypted);
+            } else if (!dhReady){
+            std::cout << "DH NOT Ready\n";
             }
-            if (client_socket)
-                client_socket->send(line);
+
         }
     });
 
@@ -83,24 +104,42 @@ void run_client(std::string& ip, int port)
         ip = "127.0.0.1";
     }
     std::string url = "ws://" + ip + ":" + std::to_string(port) + "/";
-
     ws.setUrl(url);
+
+    DiffieHellman dh(DH_PRIME, DH_GENERATOR);
+    uint64_t sharedKey = 0;
+    bool dhReady = false;
 
     ws.setOnMessageCallback(
         [&](const ix::WebSocketMessagePtr& msg)
         {
-            if (msg->type == ix::WebSocketMessageType::Open)
+            switch (msg->type)
             {
-                std::cout << "[state] Connected to the server " << ip << ":" << port << std::endl;
-            }
-            else if (msg->type == ix::WebSocketMessageType::Message)
-            {
-                std::cout << "[peer] " << msg->str << std::endl;
-            }
-            else if (msg->type == ix::WebSocketMessageType::Close)
-            {
-                std::cout << "[state] Connection is closed.\n";
-            }
+                case ix::WebSocketMessageType::Open:
+                    std::cout << "[state] Connected to the server " << ip << ":" << port << '\n';
+                    ws.send(std::to_string(dh.getPublicKey()));
+                    break;
+                case ix::WebSocketMessageType::Message:
+                    if (!dhReady)
+                    {
+                        uint64_t serverPub = std::stoull(msg->str);
+                        sharedKey = dh.computeSharedKey(serverPub);
+                        dhReady = true;
+
+                        std::cout << "[DH] Shared key established\n";
+                    }
+                    else
+                    {
+                        std::string decrypted = DiffieHellman::xorCrypt(msg->str, sharedKey);
+                        std::cout << "[peer] " << decrypted << '\n';
+                    }
+                    break;
+                case ix::WebSocketMessageType::Close:
+                    std::cout << "[state] Connection is closed.\n";
+                    break;
+                default:
+                    break;
+            } 
         });
 
     ws.start();
@@ -114,7 +153,13 @@ void run_client(std::string& ip, int port)
     {
         std::getline(std::cin, line);
         if (line == "exit") break;
-        ws.send(line);
+        if (dhReady)
+        {
+            std::string encrypted = DiffieHellman::xorCrypt(line, sharedKey);
+            ws.send(encrypted);
+        } else {
+            std::cout << "DH NOT Ready\n";
+        }
     }
 
     ws.stop();

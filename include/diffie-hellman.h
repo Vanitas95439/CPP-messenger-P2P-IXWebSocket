@@ -42,6 +42,15 @@ public:
     uint64_t computeSharedKey(uint64_t otherPublic) const {
         return modPow(otherPublic, privateKey, prime);
     }
+
+    // Симметричное XOR-шифрование 
+    static std::string xorCrypt(const std::string& data, uint64_t key) {
+        std::string result = data;
+        for (size_t i = 0; i < result.size(); ++i) {
+            result[i] ^= static_cast<char>((key >> ((i % 8) * 8)) & 0xFF);
+        }
+        return result;
+    }
 };
 
 #endif // DIFFIE_HELLMAN_H
