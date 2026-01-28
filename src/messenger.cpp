@@ -3,83 +3,21 @@
 #include <thread>
 #include <sstream>
 #include <atomic>
+#include "diffie-hellman.h"
 #include <ixwebsocket/IXWebSocketServer.h>
 #include <ixwebsocket/IXWebSocket.h>
 #include <ixwebsocket/IXNetSystem.h>
-#include <ixwebsocket/IXHttpClient.h> 
-#include <miniupnpc/miniupnpc.h>
-#include <miniupnpc/upnpcommands.h>
 
- std::string getPublicIP()
-{
-    ix::HttpClient httpClient;
-    ix::HttpRequestArgsPtr args = std::make_shared<ix::HttpRequestArgs>();
-
-    auto response = httpClient.get("http://api.ipify.org", args);
-
-    if (response && response->statusCode == 200) {
-        return response->body;
-    }
-    else {
-        std::cerr << "[error] Can't get public IP. Status: "
-                  << (response ? std::to_string(response->statusCode) : "null");
-        return " ";
-    }
-} 
-
-bool openPort(const int& port, std::string& external_ip, UPNPUrls& urls, IGDdatas& data)
-{
-    int error;
-    UPNPDev* devlist = upnpDiscover(2000, nullptr, nullptr, 0, 0, 2, &error);
-    if (!devlist) {
-        std::cerr << "[UPnP] Router not found. Error code:" << error << '\n';
-        return false;
-    }
-
-    char lanaddr[64] = {};
-
-    int r = UPNP_GetValidIGD(devlist, &urls, &data, lanaddr, sizeof(lanaddr), nullptr, 0);
-    freeUPNPDevlist(devlist);
-
-    if (r == 0) {
-        std::cerr << "[UPnP] No valid IGD (router) found.\n";
-        return false;
-    }
-
-    char ext_ip[40];
-    if (UPNP_GetExternalIPAddress(urls.controlURL, data.first.servicetype, ext_ip) != UPNPCOMMAND_SUCCESS) {
-        std::cerr << "[UPnP] Cannot get external IP.\n";
-        return false;
-    }
-
-    external_ip = ext_ip;
-    std::cout << "[UPnP] External IP: " << external_ip << '\n';
-    std::cout << "[UPnP] Local IP: " << lanaddr << '\n';
-
-    std::string port_str = std::to_string(port);
-    int res = UPNP_AddPortMapping(urls.controlURL,
-                                  data.first.servicetype,
-                                  port_str.c_str(),   // external port
-                                  port_str.c_str(),   // internal port
-                                  lanaddr,
-                                  "IXWebSocket Chat Server",
-                                  "TCP", nullptr, nullptr);
-
-    if (res != UPNPCOMMAND_SUCCESS) {
-        std::cerr << "[UPnP] Failed to open port: " << port << '\n';
-        FreeUPNPUrls(&urls);
-        return false;
-    }
-
-    std::cout << "[UPnP] Port " << port << " successfully opened!" << '\n';
-
-    FreeUPNPUrls(&urls);
-    return true;
-}
+const uint64_t DH_PRIME = 7919;    // простое число для DH
+const uint64_t DH_GENERATOR = 2;   // генератор для DH
 
 void run_server(int port)
 {
     std::string host = "0.0.0.0";
+    if (port == 0) {
+        port = 8080; 
+        host = "127.0.0.1";
+    }
     ix::WebSocketServer server(port, host);
     ix::WebSocket* client_socket = nullptr; 
     std::atomic<bool> running(true);
@@ -92,13 +30,12 @@ void run_server(int port)
             switch (msg->type)
             {
                 case ix::WebSocketMessageType::Open:
-                    std::cout << "[state] Client connected: " << connectionState->getRemoteIp() << '\n'
-                    << "Enter the messages (use exit to close connection)\n";;
+                    std::cout << "[state] Client connected: " << connectionState->getRemoteIp() << std::endl;
                     client_socket = &webSocket;
                     break;
 
                 case ix::WebSocketMessageType::Message:
-                    std::cout << "[peer] " << msg->str << '\n';
+                    std::cout << "[peer] " << msg->str << std::endl;
                     break;
 
                 case ix::WebSocketMessageType::Close:
@@ -111,27 +48,17 @@ void run_server(int port)
             }
         });
 
-    UPNPUrls urls;
-    IGDdatas data;
-    std::string external_ip;
-    if (!openPort(port, external_ip, urls, data)) {
-        std::cerr << "[Error] Failed to open port using UPnP.\n";
-    }
-
-    if (external_ip.empty()) {
-        external_ip = getPublicIP();
-    }
-
     server.listenAndStart();
-    std::cout << "[server running] Public IP: " << external_ip << "\n"
-              << "Listening on " << host << ":" << port << "\n";
+    std::cout << "[Server running] Type 'exit' to stop\n";
 
     std::thread inputThread([&]()
     {
         std::string line;
-        while (running) {
+        while (running)
+        {
             std::getline(std::cin, line);
-            if (line == "exit") {
+            if (line == "exit")
+            {
                 running = false;
                 break;
             }
@@ -143,29 +70,35 @@ void run_server(int port)
     while (running)
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-    UPNP_DeletePortMapping(urls.controlURL, data.first.servicetype, std::to_string(port).c_str(), "TCP", nullptr);
     server.stop();
     inputThread.join();
-    std::cout << "[server stopped]\n";
+    std::cout << "[Server stopped]\n";
 }
 
-void run_client(const std::string& ip, int port)
+void run_client(std::string& ip, int port)
 {
     ix::WebSocket ws;
+    if (ip == "0" || port == 0) {
+        port = 8080;
+        ip = "127.0.0.1";
+    }
     std::string url = "ws://" + ip + ":" + std::to_string(port) + "/";
+
     ws.setUrl(url);
 
     ws.setOnMessageCallback(
         [&](const ix::WebSocketMessagePtr& msg)
         {
-            if (msg->type == ix::WebSocketMessageType::Open) {
-                std::cout << "[state] Connected to the server " << ip << ":" << port << '\n'
-                << "Enter the messages (use exit to close connection)\n";
+            if (msg->type == ix::WebSocketMessageType::Open)
+            {
+                std::cout << "[state] Connected to the server " << ip << ":" << port << std::endl;
             }
-            else if (msg->type == ix::WebSocketMessageType::Message) {
-                std::cout << "[peer] " << msg->str << '\n';
+            else if (msg->type == ix::WebSocketMessageType::Message)
+            {
+                std::cout << "[peer] " << msg->str << std::endl;
             }
-            else if (msg->type == ix::WebSocketMessageType::Close) {
+            else if (msg->type == ix::WebSocketMessageType::Close)
+            {
                 std::cout << "[state] Connection is closed.\n";
             }
         });
@@ -174,9 +107,11 @@ void run_client(const std::string& ip, int port)
     ws.enableAutomaticReconnection();
 
     std::cout << "[client] Connecting to " << url << "\n";
+    std::cout << "Enter the messages (use exit to close connection)\n";
 
     std::string line;
-    while (true) {
+    while (true)
+    {
         std::getline(std::cin, line);
         if (line == "exit") break;
         ws.send(line);
@@ -190,11 +125,9 @@ int main()
     #if defined(_WIN32) || defined(WIN32)
         ix::initNetSystem();
     #endif
-    std::cout << "=== P2P WebSocket Chat ===\n"
-    << "Enter mode and parameters in one line:\n"
-    << "Server: 1 <port>\n" 
-    << "Client: 2 <ip> <port>\n"
-    << "> ";
+    std::cout << "=== P2P WebSocket Chat ===\n";
+    std::cout << "Enter mode and parameters in one line:\n";
+    std::cout << "Server: 1 <port>\nClient: 2 <ip> <port>\n> ";
 
     std::string line;
     std::getline(std::cin, line);
@@ -202,7 +135,6 @@ int main()
 
     std::string mode;
     iss >> mode;
-    for (auto& x : mode) x = std::tolower(x);
 
     if (mode == "server" || mode == "1") {
         int port;
